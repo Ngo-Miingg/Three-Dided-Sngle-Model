@@ -1,49 +1,68 @@
-# FSA Head Pose (MediaPipe + SolvePnP) — 3-axis arrows (Nose-anchored)
+# FSA Head Pose Capture
+Estimate head pose (yaw/pitch/roll) with **MediaPipe Face Mesh + OpenCV solvePnP**, draw 3-axis arrows on the face, and auto-capture three poses (LEFT / RIGHT / DOWN). Defaults are relaxed so it’s easy to complete a session.
 
-This project estimates head pose (yaw/pitch/roll) from a webcam using **MediaPipe Face Mesh** and **OpenCV solvePnP**,
-and overlays **3 axis arrows** (X=Red, Y=Green, Z=Blue).
+## What it does
+- Detects a face, estimates yaw/pitch/roll each frame.
+- Anchors the 3D axes at the nose pixel; smoothing on angles, pose vectors, and nose anchor for steady display.
+- Guides through LEFT → RIGHT → DOWN poses; holds for ~2s (60 frames by default) then saves the sharpest buffered frame for that pose.
+- Saves into timestamped session folders, further split by pose: `captures/YYYYMMDD_HHMMSS/{left|right|down}/01_*.jpg`.
 
-**Improvements in this version**
-- Axes **start exactly at the nose landmark pixel** (anchor), like the sample image.
-- Less jitter via:
-  - `solvePnP` using previous pose as **extrinsic initial guess**
-  - optional `solvePnPRefineLM/VVS` (if available)
-  - EMA smoothing for `rvec/tvec` and nose anchor
+## Requirements
+- Python 3.9–3.12 (mediapipe compatible).
+- A webcam reachable as index `0` (or set `--camera`).
 
-## Quick start
-
-### 1) Create venv (recommended)
-**Windows**
+## Install
 ```bash
+cd D:\TinaSoft\Three-Dided-Sngle-Model\Fsa_Headpose_Project
 py -3.11 -m venv .venv
 .venv\Scripts\activate
+pip install -e .
 ```
+If you prefer without install, set `PYTHONPATH=src` before running: `$env:PYTHONPATH=(Resolve-Path src).Path` (PowerShell) or `export PYTHONPATH=$(pwd)/src` (bash).
 
-**macOS / Linux**
+## Run (desktop GUI)
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+fsa-headpose --camera 0 --flip
 ```
+- Keys: `ESC` quit, `R` restart capture flow.
+- Default tolerance is very loose; only face + direction is needed. Hold each pose ~2s to auto-save.
+- If you want faster: `fsa-headpose --stable-frames 30` (~1s hold).
 
-### 2) Install dependencies
+## Run API server (FastAPI + MJPEG)
 ```bash
-pip install -r requirements.txt
+fsa-headpose-api --camera 0 --flip --port 8000
 ```
+Visit `http://localhost:8000/` to view the stream. Snapshots and status are available via `/snapshot.jpg` and `/status`. Captures land in `captures_api/YYYYMMDD_HHMMSS/{left|right|down}/`.
 
-### 3) Run
-```bash
-python -m fsa_headpose.main --camera 0
-```
+## Output layout
+- Desktop: `captures/<session>/<pose>/<index>_<timestamp>.jpg`
+- API:    `captures_api/<session>/<pose>/<index>_<timestamp>.jpg`
+Each session folder is created per run; inside, images are grouped by pose.
 
-Press **ESC** to quit.
+## Important defaults (desktop & API)
+- Relaxed gates: no sharpness/area/border gating; just needs a detected face.
+- Stable hold: 60 frames (~2s) for each pose. Adjustable via `--stable-frames`.
+- Yaw/pitch sign: flipped by default so turning left/down shows LEFT/DOWN naturally. To restore original sign, add `--invert-yaw` or `--invert-pitch`.
 
 ## Useful flags
-Mirror display:
-```bash
-python -m fsa_headpose.main --flip
-```
+- `--flip` : mirror view (selfie).
+- `--camera N` : choose webcam index.
+- `--width/--height/--fps` : request capture parameters (tries but depends on camera).
+- `--alpha/--alpha-rt/--alpha-anchor` : smoothing strengths (0–1, closer to 1 = smoother).
+- `--shots-per-pose N` : save multiple images per pose in sequence.
 
-Extra smoothing (less jitter):
-```bash
-python -m fsa_headpose.main --alpha-rt 0.90 --alpha-anchor 0.85
+## Troubleshooting
+- **No images saved**: ensure app ran for at least the hold time while the pose label matched; files go under `captures/<timestamp>/...`. Check write permissions.
+- **Directions look reversed**: add `--invert-yaw` (or `--invert-pitch` if down/up looks flipped).
+- **Camera busy / black screen**: close other camera apps; verify index with `--camera 1`, etc.
+
+## Project layout
+```
+src/fsa_headpose/
+  main.py        # desktop GUI entry
+  api_server.py  # FastAPI streaming entry
+  pose.py        # MediaPipe Face Mesh + solvePnP
+  draw.py        # axis and text overlays
+  smoother.py    # EMA utilities
+  config.py      # basic defaults
 ```
