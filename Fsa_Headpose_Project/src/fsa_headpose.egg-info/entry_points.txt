@@ -1,3 +1,0 @@
-[console_scripts]
-fsa-headpose = fsa_headpose.main:main
-fsa-headpose-api = fsa_headpose.api_server:main
