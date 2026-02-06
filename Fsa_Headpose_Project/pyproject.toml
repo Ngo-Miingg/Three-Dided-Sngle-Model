@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fsa-headpose"
+version = "0.1.0"
+description = "Head pose capture with MediaPipe Face Mesh + OpenCV solvePnP (desktop + FastAPI)."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "opencv-python>=4.8",
+    "numpy>=1.24",
+    "mediapipe<0.10.30",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.23",
+]
+
+[project.scripts]
+fsa-headpose = "fsa_headpose.main:main"
+fsa-headpose-api = "fsa_headpose.api_server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

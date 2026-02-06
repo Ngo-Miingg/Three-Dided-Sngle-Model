@@ -99,22 +99,10 @@ def border_gate(bbox, frame_w, frame_h, margin_ratio=0.05):
     my = int(frame_h * float(margin_ratio))
     return (x1 > mx and y1 > my and x2 < frame_w - mx and y2 < frame_h - my)
 
-def direction_gate(direction, yaw, pitch, lr_max_pitch=10.0, down_max_abs_yaw=10.0):
-    # Prevent diagonal (turn+down) confusion
-    if direction in ("LEFT", "RIGHT"):
-        return pitch < lr_max_pitch
-    if direction == "DOWN":
-        return abs(yaw) < down_max_abs_yaw
-    return True
-
 def in_target_window(direction, yaw, pitch):
-    # Window rộng hơn (giống app thực tế)
-    if direction == "LEFT":
-        return (-60 <= yaw <= -15) and (pitch < 20)
-    if direction == "RIGHT":
-        return (15 <= yaw <= 60) and (pitch < 20)
-    if direction == "DOWN":
-        return (10 <= pitch <= 45) and (abs(yaw) < 20)
+    # Relaxed: just require the labeled direction
+    if direction in ("LEFT", "RIGHT", "DOWN"):
+        return True
     return False
 
 
@@ -218,11 +206,12 @@ class BestFrameBuffer:
 # Capture manager (sequential like common apps)
 # ---------------------------
 class CaptureFlow:
-    def __init__(self, outdir, stable_frames=12, shots_per_pose=1, cooldown_sec=1.0):
+    def __init__(self, outdir, stable_frames=60, shots_per_pose=1, cooldown_sec=1.0):
         self.outdir = outdir
         os.makedirs(self.outdir, exist_ok=True)
 
         self.stable_frames = int(stable_frames)
+        self._last_need_frames = int(stable_frames)
         self.shots_per_pose = int(shots_per_pose)
         self.cooldown_sec = float(cooldown_sec)
 
@@ -276,16 +265,21 @@ class CaptureFlow:
         # Only build hold if ALL conditions match target
         # Soft-window: nếu không vào window thì vẫn cho giữ, nhưng sẽ yêu cầu giữ lâu hơn
         need_frames = self.stable_frames if target_ok else int(self.stable_frames * 1.5)
+        self._last_need_frames = max(1, need_frames)
 
         if (direction == target and gates_ok and stability_ok and sharp_ok):
             self.hold_count += 1
-            ...
+            if crop_for_buffer is not None:
+                self.buffer.push(crop_for_buffer)
+            else:
+                # Fallback: push whole frame so we always have something to save
+                self.buffer.push(frame)
         else:
             self.hold_count = 0
             self.buffer.clear()
 
         # Và khi check đủ:
-        if self.hold_count >= need_frames and len(self.buffer) >= min(6, need_frames):
+        if self.hold_count >= need_frames and len(self.buffer) >= 1:
             best_crop, best_score = self.buffer.best()
             if best_crop is None:
                 self.hold_count = 0
@@ -295,8 +289,10 @@ class CaptureFlow:
             # Save best crop
             ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             idx = self.done_counts[target] + 1
-            filename = f"{target.lower()}_{idx:02d}_{ts}.jpg"
-            path = os.path.join(self.outdir, filename)
+            pose_dir = os.path.join(self.outdir, target.lower())
+            os.makedirs(pose_dir, exist_ok=True)
+            filename = f"{idx:02d}_{ts}.jpg"
+            path = os.path.join(pose_dir, filename)
             ok = cv2.imwrite(path, best_crop)
 
             self.hold_count = 0
@@ -315,7 +311,7 @@ class CaptureFlow:
         return None, None
 
     def hold_progress(self):
-        return float(self.hold_count) / float(max(1, self.stable_frames))
+        return float(self.hold_count) / float(max(1, self._last_need_frames))
 
 
 # ---------------------------
@@ -339,19 +335,19 @@ def parse_args():
     p.add_argument("--pitch-exit", type=float, default=8.0)
 
     # gates
-    p.add_argument("--min-eye-dist", type=float, default=80.0)
-    p.add_argument("--min-area-ratio", type=float, default=0.06)
-    p.add_argument("--border-margin", type=float, default=0.05)
-    p.add_argument("--lr-max-pitch", type=float, default=10.0)
-    p.add_argument("--down-max-abs-yaw", type=float, default=10.0)
+    p.add_argument("--min-eye-dist", type=float, default=40.0)
+    p.add_argument("--min-area-ratio", type=float, default=0.02)
+    p.add_argument("--border-margin", type=float, default=0.02)
+    p.add_argument("--lr-max-pitch", type=float, default=45.0)
+    p.add_argument("--down-max-abs-yaw", type=float, default=45.0)
 
     # stability
-    p.add_argument("--stable-frames", type=int, default=12, help="At 30fps, 12 ~ 0.4s hold (like common apps)")
+    p.add_argument("--stable-frames", type=int, default=60, help="At 30fps, ~2s hold (user request)")
     p.add_argument("--max-angle-jump", type=float, default=2.5)
     p.add_argument("--max-center-jump", type=float, default=8.0)
 
     # sharpness
-    p.add_argument("--min-sharp", type=float, default=120.0)
+    p.add_argument("--min-sharp", type=float, default=30.0)
 
     # saving
     p.add_argument("--outdir", type=str, default="captures")
@@ -364,7 +360,7 @@ def parse_args():
     p.add_argument("--alpha-anchor", type=float, default=0.80, help="EMA alpha for nose anchor")
 
     # sign fixes
-    p.add_argument("--invert-yaw", action="store_true")
+    p.add_argument("--invert-yaw", action="store_true", help="Flip yaw sign (use if directions look reversed)")
     p.add_argument("--invert-pitch", action="store_true")
 
     return p.parse_args()
@@ -463,7 +459,8 @@ def main():
             tvec_s = rt_s[3:].reshape(3, 1).astype(np.float64)
 
             # Angles
-            yaw, pitch, roll = out["yaw"], out["pitch"], out["roll"]
+            # Flip yaw/pitch by default so LEFT turn and look DOWN map naturally on UI
+            yaw, pitch, roll = -out["yaw"], -out["pitch"], out["roll"]
             if args.invert_yaw:
                 yaw = -yaw
             if args.invert_pitch:
@@ -499,33 +496,20 @@ def main():
                 x1, y1, x2, y2 = bbox
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
 
-            # Crop for sharpness checks / buffer
+            # Crop buffer (no sharpness gate)
             crop = None
-            sharp_ok = False
+            sharp_ok = True
             if bbox is not None:
                 bb = expand_bbox(bbox, w, h, margin=0.25)
                 crop = safe_crop(frame, bb)
-                if crop is not None:
-                    sharp_ok = (sharpness_score(crop) >= float(args.min_sharp))
 
-            # Gates
-            gates_ok = (
-                (bbox is not None)
-                and size_gate(eye_dist, bbox, w, h, args.min_eye_dist, args.min_area_ratio)
-                and border_gate(bbox, w, h, args.border_margin)
-                and direction_gate(direction, yaw_s, pitch_s, args.lr_max_pitch, args.down_max_abs_yaw)
-            )
+            # Gates (relaxed)
+            gates_ok = (bbox is not None)
             target_ok = in_target_window(direction, yaw_s, pitch_s)
-            stability_ok = stability.ok(yaw_s, pitch_s, bbox)
+            stability_ok = True
 
-            # Optional: show why not passing (debug-ish but helpful)
-            if direction != "NO_FACE" and not flow.is_done():
-                reasons = []
-                if not gates_ok: reasons.append("gates")
-                if not target_ok: reasons.append("window")
-                if not stability_ok: reasons.append("stable")
-                if not sharp_ok: reasons.append("sharp")
-                gates_debug = ("OK" if not reasons else "need:" + ",".join(reasons))
+            # Keep UI clean: no detailed gate reasons
+            gates_debug = ""
 
             # Update capture flow (sequential like apps)
             saved_path, msg = flow.update(
@@ -579,7 +563,8 @@ def main():
 
         # Small info
         put_line(frame, f"FPS target: {args.fps:.0f}   measured: {fps_now:.1f}", 30, 195, scale=0.55, color=(255, 255, 255), thick=2)
-        put_line(frame, f"Check: {gates_debug}", 300, 195, scale=0.55, color=(0, 255, 0) if gates_debug == "OK" else (0, 255, 255), thick=2)
+        if gates_debug:
+            put_line(frame, f"Check: {gates_debug}", 300, 195, scale=0.55, color=(0, 255, 0) if gates_debug == "OK" else (0, 255, 255), thick=2)
 
         # Capture message (short toast)
         if last_msg and (time.perf_counter() - last_msg_t) < 1.5:

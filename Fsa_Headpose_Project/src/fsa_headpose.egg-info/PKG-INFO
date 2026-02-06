@@ -1,0 +1,66 @@
+Metadata-Version: 2.4
+Name: fsa-headpose
+Version: 0.1.0
+Summary: Head pose capture with MediaPipe Face Mesh + OpenCV solvePnP (desktop + FastAPI).
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: opencv-python>=4.8
+Requires-Dist: numpy>=1.24
+Requires-Dist: mediapipe<0.10.30
+Requires-Dist: fastapi>=0.110
+Requires-Dist: uvicorn[standard]>=0.23
+
+# FSA Head Pose (MediaPipe + SolvePnP) — 3-axis arrows (Nose-anchored)
+
+This project estimates head pose (yaw/pitch/roll) from a webcam using **MediaPipe Face Mesh** and **OpenCV solvePnP**,
+and overlays **3 axis arrows** (X=Red, Y=Green, Z=Blue).
+
+**Improvements in this version**
+- Axes **start exactly at the nose landmark pixel** (anchor), like the sample image.
+- Less jitter via:
+  - `solvePnP` using previous pose as **extrinsic initial guess**
+  - optional `solvePnPRefineLM/VVS` (if available)
+  - EMA smoothing for `rvec/tvec` and nose anchor
+
+## Quick start
+
+### 1) Create venv (recommended)
+**Windows**
+```bash
+py -3.11 -m venv .venv
+.venv\Scripts\activate
+```
+
+**macOS / Linux**
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+### 2) Install dependencies (editable so you get console scripts)
+```bash
+pip install -e .
+```
+
+### 3) Run (desktop)
+```bash
+fsa-headpose --camera 0 --flip
+```
+
+### 4) Run API (FastAPI + MJPEG)
+```bash
+fsa-headpose-api --camera 0
+```
+
+Press **ESC** to quit.
+
+## Useful flags
+Mirror display:
+```bash
+python -m fsa_headpose.main --flip
+```
+
+Easier capture (relaxed gates & sharpness already default): defaults are tuned easier than before, but you can relax further:
+```bash
+fsa-headpose --min-eye-dist 50 --min-area-ratio 0.03 --stable-frames 6 --min-sharp 50
+```

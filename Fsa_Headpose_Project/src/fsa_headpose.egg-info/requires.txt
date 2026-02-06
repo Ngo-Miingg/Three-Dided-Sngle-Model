@@ -1,4 +1,3 @@
-# Recommended to use Python 3.9–3.12 for mediapipe
 opencv-python>=4.8
 numpy>=1.24
 mediapipe<0.10.30

@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+*.dylib
+
+# Virtual envs
+.venv/
+env/
+venv/
+
+# Editor/OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Captures/output
+captures*/
+captures_api*/
+

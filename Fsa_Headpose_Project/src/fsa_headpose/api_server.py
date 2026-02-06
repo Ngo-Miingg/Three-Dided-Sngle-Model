@@ -159,7 +159,7 @@ class BestFrameBuffer:
 
 
 class CaptureFlow:
-    def __init__(self, outdir, stable_frames=8, shots_per_pose=1, cooldown_sec=0.7):
+    def __init__(self, outdir, stable_frames=60, shots_per_pose=1, cooldown_sec=0.7):
         self.outdir = outdir
         os.makedirs(self.outdir, exist_ok=True)
 
@@ -221,11 +221,13 @@ class CaptureFlow:
             self.hold_count += 1
             if crop_for_buffer is not None:
                 self.buffer.push(crop_for_buffer)
+            else:
+                self.buffer.push(frame)
         else:
             self.hold_count = 0
             self.buffer.clear()
 
-        if self.hold_count >= need_frames and len(self.buffer) >= min(5, need_frames):
+        if self.hold_count >= need_frames and len(self.buffer) >= 1:
             best_crop, best_score = self.buffer.best()
             self.hold_count = 0
             self.buffer.clear()
@@ -235,8 +237,10 @@ class CaptureFlow:
 
             ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             idx = self.done[target] + 1
-            filename = f"{target.lower()}_{idx:02d}_{ts}.jpg"
-            path = os.path.join(self.outdir, filename)
+            pose_dir = os.path.join(self.outdir, target.lower())
+            os.makedirs(pose_dir, exist_ok=True)
+            filename = f"{idx:02d}_{ts}.jpg"
+            path = os.path.join(pose_dir, filename)
             ok = cv2.imwrite(path, best_crop)
             if ok:
                 self.done[target] += 1
@@ -322,6 +326,11 @@ def build_app(shared: SharedState):
                 time.sleep(0.03)
         return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
 
+    @app.on_event("shutdown")
+    def _shutdown():
+        # Signal background thread to stop so camera releases cleanly
+        shared.running = False
+
     return app
 
 
@@ -337,12 +346,12 @@ def parse_args():
     p.add_argument("--fourcc", default="MJPG")
     p.add_argument("--flip", action="store_true")
 
-    p.add_argument("--min-eye-dist", type=float, default=60.0)
-    p.add_argument("--min-area-ratio", type=float, default=0.04)
-    p.add_argument("--border-margin", type=float, default=0.03)
-    p.add_argument("--min-sharp", type=float, default=70.0)
+    p.add_argument("--min-eye-dist", type=float, default=40.0)
+    p.add_argument("--min-area-ratio", type=float, default=0.02)
+    p.add_argument("--border-margin", type=float, default=0.02)
+    p.add_argument("--min-sharp", type=float, default=30.0)
 
-    p.add_argument("--stable-frames", type=int, default=8)
+    p.add_argument("--stable-frames", type=int, default=60)
     p.add_argument("--shots-per-pose", type=int, default=1)
     p.add_argument("--outdir", default="captures_api")
 
@@ -364,6 +373,13 @@ def run_engine(shared: SharedState, args):
 
     cap = cv2.VideoCapture(cfg.camera_index)
     set_camera_params(cap, cfg.width, cfg.height, args.fps, args.fourcc)
+
+    if not cap.isOpened():
+        with shared.lock:
+            shared.status = {"error": f"Cannot open camera {cfg.camera_index}"}
+        shared.running = False
+        cap.release()
+        return
 
     estimator = HeadPoseEstimator(use_extrinsic_guess=True, refine_pnp=True)
     dir_state = DirectionState()
@@ -404,7 +420,8 @@ def run_engine(shared: SharedState, args):
             rvec_s = rt_s[:3].reshape(3, 1).astype(np.float64)
             tvec_s = rt_s[3:].reshape(3, 1).astype(np.float64)
 
-            yaw, pitch, roll = out["yaw"], out["pitch"], out["roll"]
+            # Flip yaw/pitch by default so LEFT/DOWN map naturally in UI/api
+            yaw, pitch, roll = -out["yaw"], -out["pitch"], out["roll"]
             if args.invert_yaw:
                 yaw = -yaw
             if args.invert_pitch:
@@ -427,31 +444,19 @@ def run_engine(shared: SharedState, args):
 
             bbox = out["bbox"]
             crop = None
-            sharp_ok = False
+            sharp_ok = True
 
             if bbox is not None:
                 x1, y1, x2, y2 = bbox
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
                 bb = expand_bbox(bbox, w, h, margin=0.25)
                 crop = safe_crop(frame, bb)
-                if crop is not None:
-                    sharp_ok = (sharpness_score(crop) >= float(args.min_sharp))
 
-            gates_ok = (
-                bbox is not None
-                and eye_dist >= float(args.min_eye_dist)
-                and ((x2-x1)*(y2-y1) >= w*h*float(args.min_area_ratio))
-                and direction_gate(direction, yaw_s, pitch_s)
-            )
+            gates_ok = (bbox is not None)
             target_ok = in_target_window(direction, yaw_s, pitch_s)
-            stability_ok = stability.ok(yaw_s, pitch_s, bbox)
+            stability_ok = True
 
-            if not gates_ok: gates_debug += "gates "
-            if not target_ok: gates_debug += "window "
-            if not stability_ok: gates_debug += "stable "
-            if not sharp_ok: gates_debug += "sharp "
-            if gates_debug.strip() == "":
-                gates_debug = "OK"
+            gates_debug = "OK" if (gates_ok and target_ok) else ""
 
             saved_path, _ = flow.update(
                 direction, frame, bbox, eye_dist, yaw_s, pitch_s,
@@ -516,7 +521,7 @@ def main():
     args = parse_args()
     shared = SharedState()
 
-    t = threading.Thread(target=run_engine, args=(shared, args), daemon=True)
+    t = threading.Thread(target=run_engine, args=(shared, args), daemon=False)
     t.start()
 
     app = build_app(shared)
@@ -525,6 +530,7 @@ def main():
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
     shared.running = False
+    t.join(timeout=2.0)
 
 
 if __name__ == "__main__":
